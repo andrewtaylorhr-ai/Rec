@@ -1045,6 +1045,54 @@ function logHermesExportCounts() {
   return summary;
 }
 
+function logHermesExportDiagnostics() {
+  var props = PropertiesService.getScriptProperties();
+  var diagnostics = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    dbSheetIdPresent: !!props.getProperty('DB_SHEET_ID'),
+    dbSyncedAt: props.getProperty('DB_SYNCED_AT') || null,
+    syncTriggerOn: props.getProperty('SYNC_TRIGGER_ON') || null,
+    syncInfo: null,
+    sheetRowsTotal: null,
+    ranges: {},
+    gmailQueryCounts: {},
+    seedPreview: null
+  };
+
+  try { diagnostics.syncInfo = getSyncInfo(); } catch (e) { diagnostics.syncInfo = { error: String(e) }; }
+  try { diagnostics.sheetRowsTotal = getDriversFromSheet().length; } catch (e2) { diagnostics.sheetRowsTotal = { error: String(e2) }; }
+
+  [30, 90, 180, 365, 9999].forEach(function(days) {
+    try {
+      var out = exportHermesEvents(days, false);
+      diagnostics.ranges[String(days)] = {
+        driverCount: out.driverCount,
+        eventCount: out.eventCount,
+        warningCount: (out.warnings || []).length,
+        eventTypeCounts: hermesCountEventTypes_(out.events || [])
+      };
+    } catch (e3) {
+      diagnostics.ranges[String(days)] = { error: String(e3) };
+    }
+  });
+
+  var queries = {
+    fullSubmissionThreads: 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START,
+    recentSubmissionThreads: 'from:' + SUBMISSION_SENDER + ' subject:submission newer_than:30d after:' + DATA_START,
+    senderOnlyRecent: 'from:' + SUBMISSION_SENDER + ' newer_than:30d',
+    submissionSubjectRecent: 'subject:submission newer_than:30d'
+  };
+  for (var name in queries) {
+    if (!queries.hasOwnProperty(name)) continue;
+    try { diagnostics.gmailQueryCounts[name] = listThreadIds(queries[name], 20).length; }
+    catch (e4) { diagnostics.gmailQueryCounts[name] = { error: String(e4) }; }
+  }
+
+  console.log(JSON.stringify(diagnostics, null, 2));
+  return diagnostics;
+}
+
 function hermesCountEventTypes_(events) {
   var counts = {};
   for (var i = 0; i < events.length; i++) {
