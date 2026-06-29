@@ -831,3 +831,201 @@ function _refreshNow() {
     console.log('Could not clear cache: ' + err);
   }
 }
+
+// ===================================================================
+// HERMES READ-ONLY EVENT EXPORT
+// -------------------------------------------------------------------
+// Local-only addition for Recruiter Hermes integration. These functions do
+// not write to Gmail, Sheets, triggers, or Script Properties. They convert the
+// existing parsed email-thread rows into normalized event objects that Hermes
+// can consume, then test against demo Driver Management tabs.
+// ===================================================================
+
+var HERMES_EVENT_VERSION = 'rec-email-events-v1';
+
+function exportHermesEvents(range, force) {
+  var drivers = fetchSubmissions(range || 30, !!force) || [];
+  var events = [];
+  var warnings = [];
+  for (var i = 0; i < drivers.length; i++) {
+    try {
+      var rowEvents = hermesEventsForDriver_(drivers[i]);
+      for (var j = 0; j < rowEvents.length; j++) events.push(rowEvents[j]);
+    } catch (e) {
+      warnings.push({ index: i, error: String(e) });
+    }
+  }
+  return {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    source: 'rec_apps_script_email_threads',
+    generatedAt: new Date().toISOString(),
+    range: range || 30,
+    force: !!force,
+    driverCount: drivers.length,
+    eventCount: events.length,
+    events: events,
+    warnings: warnings
+  };
+}
+
+function hermesEventsForDriver_(driver) {
+  driver = driver || {};
+  var messages = driver.messages || [];
+  var text = hermesDriverText_(driver);
+  var stage = hermesClassifyStage_(driver, text);
+  var base = hermesBaseEvent_(driver, stage);
+  var events = [];
+
+  // Every valid parsed driver thread starts as one submission event. The
+  // threadId is the idempotency key so replies do not double-count submissions.
+  events.push(hermesBuildEvent_(base, 'submission', driver.date, [
+    'parsed_submission_thread',
+    driver.subject ? 'subject:' + String(driver.subject).substring(0, 80) : 'subject:missing'
+  ]));
+
+  if (stage.eventType && stage.eventType !== 'submission') {
+    events.push(hermesBuildEvent_(base, stage.eventType, stage.eventAt || driver.lastReplyAt || driver.date, stage.signals));
+  }
+
+  if (messages.length > 1 && !stage.eventType) {
+    events.push(hermesBuildEvent_(base, 'thread_update', driver.lastReplyAt || driver.date, [
+      'reply_count:' + String(Math.max(0, messages.length - 1))
+    ]));
+  }
+
+  return events;
+}
+
+function hermesBaseEvent_(driver, stage) {
+  return {
+    threadId: driver.threadId || '',
+    driverKey: hermesDriverKey_(driver),
+    driverName: driver.name || '',
+    email: driver.email || '',
+    phone: hermesNormalizePhone_(driver.phone || ''),
+    carrier: driver.carrier || '',
+    recruiter: driver.recruiter || '',
+    subject: driver.subject || '',
+    permalink: driver.permalink || '',
+    sourceStage: stage.stage || '',
+    confidence: stage.confidence || 'medium',
+    replyCount: Math.max(0, (driver.messages || []).length - 1),
+    lastReplyAt: driver.lastReplyAt || null
+  };
+}
+
+function hermesBuildEvent_(base, eventType, eventAt, signals) {
+  var out = {};
+  for (var k in base) if (base.hasOwnProperty(k)) out[k] = base[k];
+  out.eventType = eventType;
+  out.eventAt = eventAt || base.lastReplyAt || '';
+  out.signals = signals || [];
+  out.idempotencyKey = [eventType, base.threadId || base.driverKey || '', out.eventAt || ''].join(':');
+  return out;
+}
+
+function hermesClassifyStage_(driver, text) {
+  text = String(text || '').toLowerCase();
+  var stage = { stage: '', eventType: '', confidence: 'low', signals: [] };
+  function hit(type, label, patterns, confidence) {
+    for (var i = 0; i < patterns.length; i++) {
+      if (patterns[i].test(text)) {
+        stage.eventType = type;
+        stage.stage = label;
+        stage.confidence = confidence || 'medium';
+        stage.signals.push('pattern:' + patterns[i].source.substring(0, 80));
+        stage.eventAt = driver.lastReplyAt || driver.date || '';
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Highest priority terminal states first.
+  if (hit('hire', 'Hired', [
+    /\bhired\b/i,
+    /\bdriver\s+is\s+hired\b/i,
+    /\bcompleted\s+orientation\b/i,
+    /\breleased\s+to\s+dispatch\b/i,
+    /\bdispatched\b/i
+  ], 'medium')) return stage;
+
+  if (hit('dq_from_dqp', 'DQed', [
+    /\bdq(?:ed)?\b/i,
+    /\bnot\s+qualified\b/i,
+    /\bno\s*show\b/i,
+    /\bcarrier\s+(?:has\s+)?(?:chosen\s+to\s+)?pass(?:ed)?\b/i,
+    /\bpass\s+on\s+(?:the\s+)?driver\b/i,
+    /\bditched\s+us\b/i
+  ], 'medium')) return stage;
+
+  if (hit('needs_attention', 'Need Attention', [
+    /\bneed(?:s)?\s+attention\b/i,
+    /\bmissing\s+(?:doc|docs|document|documents)\b/i,
+    /\bneed(?:s)?\s+(?:doc|docs|document|documents)\b/i,
+    /\bwaiting\s+for\s+(?:rc|recruiter|documents|docs)\b/i,
+    /\bneed\s+to\s+reschedule\b/i,
+    /\breschedule\b/i
+  ], 'medium')) return stage;
+
+  if (hit('confirmed_dqp', 'Confirmed DQP', [
+    /\bdqp\s+confirmed\b/i,
+    /\bconfirmed\s+(?:for\s+)?(?:dqp|orientation)\b/i,
+    /\bscheduled\s+(?:for\s+)?(?:dqp|orientation)\b/i,
+    /\bat\s+(?:the\s+)?orientation\b/i,
+    /\bshow\b/i,
+    /\bapproved\b/i
+  ], 'medium')) return stage;
+
+  stage.stage = 'Submitted';
+  stage.confidence = 'medium';
+  stage.signals.push('default:submission_thread');
+  return stage;
+}
+
+function hermesDriverText_(driver) {
+  var parts = [driver.subject || '', driver.snippet || '', driver.message || ''];
+  var messages = driver.messages || [];
+  for (var i = 0; i < messages.length; i++) {
+    parts.push(messages[i].subject || '');
+    parts.push(messages[i].snippet || '');
+    parts.push(messages[i].body || '');
+  }
+  return parts.join('\n');
+}
+
+function hermesNormalizePhone_(phone) {
+  var digits = String(phone || '').replace(/[^0-9]/g, '');
+  if (digits.length === 11 && digits.charAt(0) === '1') digits = digits.slice(1);
+  return digits;
+}
+
+function hermesDriverKey_(driver) {
+  var phone = hermesNormalizePhone_(driver && driver.phone);
+  if (phone) return 'phone:' + phone;
+  var email = String((driver && driver.email) || '').toLowerCase().trim();
+  if (email) return 'email:' + email;
+  var name = String((driver && driver.name) || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return name ? 'name:' + name : 'thread:' + String((driver && driver.threadId) || 'unknown');
+}
+
+function _hermesExportSelftest() {
+  var sample = {
+    threadId: 'sample-thread',
+    date: '2026-06-29T12:00:00.000Z',
+    subject: 'New Swift submission for Test Driver - Class A Recruiting',
+    name: 'Test Driver',
+    phone: '(555) 123-4567',
+    carrier: 'Swift',
+    recruiter: 'Robert',
+    messages: [
+      { subject: 'New Swift submission', body: 'Application Info\nName: Test Driver\nPhone 1: 5551234567', date: '2026-06-29T12:00:00.000Z' },
+      { subject: 'Re: New Swift submission', body: 'Driver is confirmed for DQP orientation Monday.', date: '2026-06-29T13:00:00.000Z' }
+    ],
+    lastReplyAt: '2026-06-29T13:00:00.000Z'
+  };
+  var events = hermesEventsForDriver_(sample);
+  console.log(JSON.stringify(events));
+  return events;
+}
