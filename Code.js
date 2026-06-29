@@ -1029,3 +1029,27 @@ function _hermesExportSelftest() {
   console.log(JSON.stringify(events));
   return events;
 }
+
+function logHermesExportCounts() {
+  var out = exportHermesEvents(30, false);
+  var summary = {
+    ok: !!out.ok,
+    version: out.version,
+    source: out.source,
+    driverCount: out.driverCount,
+    eventCount: out.eventCount,
+    warningCount: (out.warnings || []).length,
+    eventTypeCounts: hermesCountEventTypes_(out.events || [])
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+function hermesCountEventTypes_(events) {
+  var counts = {};
+  for (var i = 0; i < events.length; i++) {
+    var t = events[i] && events[i].eventType ? events[i].eventType : 'unknown';
+    counts[t] = (counts[t] || 0) + 1;
+  }
+  return counts;
+}
