@@ -1099,6 +1099,83 @@ function logHermesEmailFormatDiscovery() {
   return discovery;
 }
 
+function saveHermesEmailFormatDiscovery() {
+  var discovery = discoverHermesEmailFormats_(20000);
+  var name = 'hermes-email-format-discovery-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') + '.json';
+  var file = DriveApp.createFile(name, JSON.stringify(discovery, null, 2), MimeType.PLAIN_TEXT);
+  var summary = {
+    ok: true,
+    fileName: name,
+    fileId: file.getId(),
+    fileUrl: file.getUrl(),
+    knownSenderTotal: ((discovery.querySummaries || {}).known_sender_all || {}).totalMessages || 0,
+    subjectSubmissionTotal: ((discovery.querySummaries || {}).subject_submission_all || {}).totalMessages || 0,
+    likelyFormatIssues: discovery.likelyFormatIssues || []
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+function logHermesSubmissionParseDiagnostics() {
+  var out = diagnoseHermesSubmissionParsing_(250);
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+function diagnoseHermesSubmissionParsing_(limit) {
+  limit = limit || 250;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, limit);
+  var threads = batchGet(ids, 'threads');
+  var out = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    query: query,
+    candidateThreads: ids.length,
+    fetchedThreads: threads.length,
+    parsed: 0,
+    rejected: 0,
+    rejectReasons: {},
+    firstMessageSignals: {
+      hasApplicationInfo: 0,
+      hasPhone: 0,
+      hasRecruiter: 0,
+      hasCarrier: 0,
+      notificationLike: 0,
+      emptySnippet: 0
+    }
+  };
+  for (var i = 0; i < threads.length; i++) {
+    var th = threads[i];
+    if (!th) {
+      out.rejected++;
+      inc_(out.rejectReasons, 'thread_fetch_null');
+      continue;
+    }
+    try {
+      var raw = (th.messages || []).slice();
+      raw.sort(function(a, b) { return (parseInt(a.internalDate, 10) || 0) - (parseInt(b.internalDate, 10) || 0); });
+      var first = raw[0] || {};
+      var p = first.payload || {};
+      var subj = getHeader(p, 'Subject') || '';
+      var snip = decodeEntities(first.snippet || '');
+      var text = (subj + ' ' + snip).toLowerCase();
+      if (!snip) out.firstMessageSignals.emptySnippet++;
+      if (text.indexOf('application info') >= 0) out.firstMessageSignals.hasApplicationInfo++;
+      if (/\bphone\b|phone\s*1/.test(text)) out.firstMessageSignals.hasPhone++;
+      if (/\brecruiter\b/.test(text)) out.firstMessageSignals.hasRecruiter++;
+      if (/\bcarrier\b|swift|pam|usx|u\.s\.\s*xpress|us xpress/.test(text)) out.firstMessageSignals.hasCarrier++;
+      if (isNotificationEmail(subj, snip)) out.firstMessageSignals.notificationLike++;
+      threadToDriverRow(th);
+      out.parsed++;
+    } catch (e) {
+      out.rejected++;
+      inc_(out.rejectReasons, String(e).substring(0, 140));
+    }
+  }
+  return out;
+}
+
 function discoverHermesEmailFormats_(maxMessages) {
   var queries = {
     known_sender_all: 'from:' + SUBMISSION_SENDER + ' after:' + DATA_START,
