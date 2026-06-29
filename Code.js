@@ -1110,7 +1110,26 @@ function logHermesExportCounts() {
 
 function saveHermesExportEvents() {
   var out = exportHermesEvents(30, false);
-  var name = 'hermes-rec-export-events-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') + '.json';
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-30d');
+}
+
+function saveHermesExportEvents7d() {
+  var out = exportHermesEvents(7, false);
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-7d');
+}
+
+function saveHermesExportEventsSample() {
+  var out = exportHermesEvents(30, false);
+  var sampleLimit = 50;
+  out.events = (out.events || []).slice(0, sampleLimit);
+  out.eventCount = out.events.length;
+  out.sampled = true;
+  out.sampleLimit = sampleLimit;
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-sample');
+}
+
+function saveHermesExportPayload_(out, prefix) {
+  var name = prefix + '-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') + '.json';
   var file = DriveApp.createFile(name, JSON.stringify(out, null, 2), MimeType.PLAIN_TEXT);
   var summary = {
     ok: !!out.ok,
@@ -1122,6 +1141,8 @@ function saveHermesExportEvents() {
     driverCount: out.driverCount,
     eventCount: out.eventCount,
     warningCount: (out.warnings || []).length,
+    sampled: !!out.sampled,
+    sampleLimit: out.sampleLimit || null,
     eventTypeCounts: hermesCountEventTypes_(out.events || [])
   };
   console.log(JSON.stringify(summary, null, 2));
