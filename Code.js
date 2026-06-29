@@ -475,44 +475,24 @@ function fetchThread(threadId) {
   return result;
 }
 
-// ---- fetchSummary: 12-month data for the Performance page (cached 6h) ----
+// ---- fetchSummary: lightweight data for the Performance page (reads the Sheet) ----
+// The Sheet already holds every submission since DATA_START, so derive the summary
+// straight from it instead of hitting Gmail (avoids the old fetchAll hang + quota).
 function fetchSummary(daysBack) {
-  var cacheKey = 'gsum5';
-  var cached = cacheGet(cacheKey);
-  if (cached) {
-    try { return JSON.parse(cached); } catch (e) {}
+  var all = getDriversFromSheet();
+  if (!all.length) {
+    try { syncToSheet({ full: true }); all = getDriversFromSheet(); } catch (e) {}
   }
-  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
-  var ids = listMessageIds(query, SUMMARY_MAX);
-  if (!ids.length) return [];
-
-  var token = ScriptApp.getOAuthToken();
   var out = [];
-  var startTime = Date.now();
-  for (var c = 0; c < ids.length; c += FETCH_CHUNK) {
-    if (Date.now() - startTime > SUMMARY_TIME_BUDGET_MS) break;
-    var got = fetchChunk(ids.slice(c, c + FETCH_CHUNK), token, 'messages');
-    for (var i = 0; i < got.length; i++) {
-      var m = got[i];
-      if (!m) continue;
-      try {
-        var p = m.payload || {};
-        var _subj = getHeader(p, 'Subject');
-        var _body = decodeEntities(m.snippet || '');
-        if (isNotificationEmail(_subj, _body)) continue;
-        var parsed = parseSubmissionBody('', _subj, _body);
-        var dms = parseInt(m.internalDate, 10);
-        out.push({
-          threadId: m.threadId,
-          date: isNaN(dms) ? '' : new Date(dms).toISOString(),
-          name: parsed.name,
-          recruiter: parsed.recruiter,
-          carrier: parsed.carrier
-        });
-      } catch (err) {}
-    }
+  for (var i = 0; i < all.length; i++) {
+    out.push({
+      threadId: all[i].threadId,
+      date: all[i].date,
+      name: all[i].name,
+      recruiter: all[i].recruiter,
+      carrier: all[i].carrier
+    });
   }
-  cachePut(cacheKey, JSON.stringify(out), SUMMARY_CACHE_SECONDS);
   return out;
 }
 

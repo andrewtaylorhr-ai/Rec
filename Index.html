@@ -1045,7 +1045,7 @@ function unwrapMcp(res) {
 }
 
 async function fetchAllSubmissions(windowDays, force) {
-  setStatus(force ? 'Pulling fresh data from Gmail…' : 'Loading drivers from Gmail…');
+  setStatus(force ? 'Syncing latest from Gmail…' : 'Loading drivers…');
   return new Promise((resolve, reject) => {
     if (typeof google === 'undefined' || !google.script || !google.script.run) {
       // Not running inside the deployed Apps Script — fall back to empty list with a helpful message.
@@ -3395,8 +3395,11 @@ async function init() {
       winSel.appendChild(opt);
     });
   }
-  // Use the same 14-day window the working v50 used, so this reuses the already-cached data (instant load).
-  applyRangeValue('14');
+  // Reads come from the Sheet now, so any window loads instantly. Default to the
+  // full list (last 12 months) so the whole pipeline shows, honoring a saved choice.
+  var savedWin = '';
+  try { savedWin = localStorage.getItem('driver-tracker-window') || ''; } catch (e) {}
+  applyRangeValue(savedWin || '365');
   if (winSel) winSel.value = filters.range;
 
   document.querySelectorAll('#period-tabs button').forEach(btn => {
@@ -3430,9 +3433,9 @@ async function init() {
   document.getElementById('btn-refresh').addEventListener('click', async () => {
     const btn = document.getElementById('btn-refresh');
     const prev = btn.textContent;
-    btn.textContent = 'Refreshing… (up to 2 min)';
+    btn.textContent = 'Syncing latest…';
     btn.disabled = true;
-    document.getElementById('driver-table-wrap').innerHTML = '<div class="loading">Pulling fresh data from Gmail…</div>';
+    document.getElementById('driver-table-wrap').innerHTML = '<div class="loading">Syncing the latest submissions from Gmail…</div>';
     try {
       allDrivers = await fetchAllSubmissions(filters.range, true);
       renderAll();
