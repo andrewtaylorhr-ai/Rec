@@ -1093,6 +1093,148 @@ function logHermesExportDiagnostics() {
   return diagnostics;
 }
 
+function logHermesEmailFormatDiscovery() {
+  var discovery = discoverHermesEmailFormats_(20000);
+  console.log(JSON.stringify(discovery, null, 2));
+  return discovery;
+}
+
+function discoverHermesEmailFormats_(maxMessages) {
+  var queries = {
+    known_sender_all: 'from:' + SUBMISSION_SENDER + ' after:' + DATA_START,
+    subject_submission_all: 'subject:submission after:' + DATA_START,
+    application_terms_all: '(submission OR application OR driver OR orientation OR DQP OR hired OR DQed OR scheduled OR confirmed) after:' + DATA_START,
+    recent_any_30d: '(submission OR application OR driver OR orientation OR DQP OR hired OR scheduled OR confirmed) newer_than:30d'
+  };
+  var out = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    generatedAt: new Date().toISOString(),
+    maxMessages: maxMessages || 20000,
+    senderConfigured: SUBMISSION_SENDER,
+    dataStart: DATA_START,
+    querySummaries: {},
+    likelyFormatIssues: []
+  };
+  for (var qname in queries) {
+    if (!queries.hasOwnProperty(qname)) continue;
+    try {
+      out.querySummaries[qname] = summarizeGmailMessageFormats_(queries[qname], maxMessages || 20000);
+    } catch (e) {
+      out.querySummaries[qname] = { error: String(e) };
+    }
+  }
+  var known = out.querySummaries.known_sender_all || {};
+  var subj = out.querySummaries.subject_submission_all || {};
+  if ((known.totalMessages || 0) === 0) out.likelyFormatIssues.push('configured sender returned zero messages');
+  if ((subj.totalMessages || 0) > (known.totalMessages || 0) * 2) out.likelyFormatIssues.push('subject:submission matches many more messages than configured sender');
+  if ((known.totalMessages || 0) > 0 && (known.bodySignalCounts && (known.bodySignalCounts.applicationInfo || 0) === 0)) out.likelyFormatIssues.push('configured sender messages do not show application-info signal in snippets');
+  return out;
+}
+
+function summarizeGmailMessageFormats_(query, maxMessages) {
+  var ids = listMessageIds(query, maxMessages || 20000);
+  var sampleIds = ids.slice(0, Math.min(ids.length, 250));
+  var messages = batchGet(sampleIds, 'messages');
+  var senders = {};
+  var subjectPrefixes = {};
+  var subjectTokens = {};
+  var bodySignals = {
+    applicationInfo: 0,
+    phone: 0,
+    recruiter: 0,
+    carrier: 0,
+    orientation: 0,
+    dqp: 0,
+    scheduled: 0,
+    confirmed: 0,
+    hired: 0,
+    dq: 0,
+    noShow: 0,
+    documents: 0
+  };
+  var parseSignals = { parseableSubmission: 0, notificationLike: 0, unknownLike: 0 };
+  for (var i = 0; i < messages.length; i++) {
+    var m = messages[i];
+    if (!m) continue;
+    var p = m.payload || {};
+    var from = sanitizeEmailForDiscovery_(getHeader(p, 'From'));
+    var subj = getHeader(p, 'Subject') || '';
+    var snip = decodeEntities(m.snippet || '');
+    inc_(senders, from || '(unknown)');
+    inc_(subjectPrefixes, subjectPrefixForDiscovery_(subj));
+    var toks = subjectTokensForDiscovery_(subj);
+    for (var t = 0; t < toks.length; t++) inc_(subjectTokens, toks[t]);
+    var text = (subj + ' ' + snip).toLowerCase();
+    if (text.indexOf('application info') >= 0) bodySignals.applicationInfo++;
+    if (/\bphone\b|phone\s*1|mobile|cell/.test(text)) bodySignals.phone++;
+    if (/\brecruiter\b/.test(text)) bodySignals.recruiter++;
+    if (/\bcarrier\b|swift|pam|usx|u\.s\.\s*xpress|us xpress/.test(text)) bodySignals.carrier++;
+    if (/\borientation\b/.test(text)) bodySignals.orientation++;
+    if (/\bdqp\b/.test(text)) bodySignals.dqp++;
+    if (/\bscheduled\b/.test(text)) bodySignals.scheduled++;
+    if (/\bconfirmed\b/.test(text)) bodySignals.confirmed++;
+    if (/\bhired\b|dispatch/.test(text)) bodySignals.hired++;
+    if (/\bdq\b|dqed|not qualified/.test(text)) bodySignals.dq++;
+    if (/no\s*show/.test(text)) bodySignals.noShow++;
+    if (/doc|document|missing/.test(text)) bodySignals.documents++;
+    if (isNotificationEmail(subj, snip)) parseSignals.notificationLike++;
+    else if (text.indexOf('application info') >= 0 || /\bname\b.*\bphone\b/.test(text)) parseSignals.parseableSubmission++;
+    else parseSignals.unknownLike++;
+  }
+  return {
+    query: query,
+    totalMessages: ids.length,
+    sampledMessages: messages.length,
+    topSenders: topCounts_(senders, 20),
+    topSubjectPrefixes: topCounts_(subjectPrefixes, 30),
+    topSubjectTokens: topCounts_(subjectTokens, 30),
+    bodySignalCounts: bodySignals,
+    parseSignalCounts: parseSignals
+  };
+}
+
+function sanitizeEmailForDiscovery_(from) {
+  from = String(from || '').toLowerCase();
+  var m = from.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/);
+  if (!m) return '(unknown)';
+  var parts = m[0].split('@');
+  var local = parts[0] || '';
+  var safeLocal = local.length <= 3 ? local.charAt(0) + '***' : local.substring(0, 3) + '***';
+  return safeLocal + '@' + parts[1];
+}
+
+function subjectPrefixForDiscovery_(subject) {
+  subject = String(subject || '').replace(/\s+/g, ' ').trim();
+  subject = subject.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]');
+  subject = subject.replace(/\b\+?1?\s*\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}\b/g, '[phone]');
+  subject = subject.replace(/\b[A-Z][a-z]+\s+[A-Z][a-z]+\b/g, '[Name]');
+  return subject.substring(0, 90) || '(empty)';
+}
+
+function subjectTokensForDiscovery_(subject) {
+  var stop = { the:1, and:1, for:1, with:1, from:1, re:1, fw:1, fwd:1, new:1, your:1, you:1, are:1, has:1, have:1, this:1, that:1 };
+  var words = String(subject || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/);
+  var out = [];
+  for (var i = 0; i < words.length; i++) {
+    var w = words[i];
+    if (w.length < 3 || stop[w]) continue;
+    out.push(w);
+  }
+  return out.slice(0, 12);
+}
+
+function inc_(obj, key) {
+  obj[key] = (obj[key] || 0) + 1;
+}
+
+function topCounts_(obj, n) {
+  var arr = [];
+  for (var k in obj) if (obj.hasOwnProperty(k)) arr.push({ value: k, count: obj[k] });
+  arr.sort(function(a, b) { return b.count - a.count || String(a.value).localeCompare(String(b.value)); });
+  return arr.slice(0, n || 20);
+}
+
 function hermesCountEventTypes_(events) {
   var counts = {};
   for (var i = 0; i < events.length; i++) {
