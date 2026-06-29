@@ -326,6 +326,69 @@ function syncToSheet(opts) {
 function seedSheet() { return syncToSheet({ full: true }); }       // full rebuild
 function installSyncTrigger() { return ensureSyncTrigger_(); }     // install the trigger
 
+function resetHermesSeedCursor() {
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty('HERMES_SEED_OFFSET');
+  console.log(JSON.stringify({ ok: true, reset: true }, null, 2));
+  return { ok: true, reset: true };
+}
+
+function seedSheetChunk() {
+  return seedSheetChunk_(200);
+}
+
+function seedSheetChunk_(chunkSize) {
+  chunkSize = chunkSize || 200;
+  var props = PropertiesService.getScriptProperties();
+  var offset = parseInt(props.getProperty('HERMES_SEED_OFFSET') || '0', 10) || 0;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, MAX_THREADS);
+  var slice = ids.slice(offset, offset + chunkSize);
+  var existing = getDriversFromSheet();
+  var byId = {};
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i] && existing[i].threadId) byId[existing[i].threadId] = existing[i];
+  }
+  var threads = batchGet(slice, 'threads');
+  var changed = 0;
+  var rejected = 0;
+  var rejectReasons = {};
+  for (var t = 0; t < threads.length; t++) {
+    if (!threads[t]) { rejected++; inc_(rejectReasons, 'thread_fetch_null'); continue; }
+    try {
+      var row = threadToDriverRow(threads[t]);
+      byId[row.threadId] = row;
+      changed++;
+    } catch (err) {
+      rejected++;
+      inc_(rejectReasons, String(err).substring(0, 140));
+    }
+  }
+  var merged = [];
+  for (var k in byId) { if (byId.hasOwnProperty(k)) merged.push(byId[k]); }
+  writeDriversToSheet_(merged);
+  var nextOffset = offset + slice.length;
+  var done = nextOffset >= ids.length || slice.length === 0;
+  if (done) props.deleteProperty('HERMES_SEED_OFFSET');
+  else props.setProperty('HERMES_SEED_OFFSET', String(nextOffset));
+  var out = {
+    ok: true,
+    query: query,
+    totalCandidateThreads: ids.length,
+    offsetStarted: offset,
+    chunkSize: chunkSize,
+    processedThisRun: slice.length,
+    changedThisRun: changed,
+    rejectedThisRun: rejected,
+    rejectReasons: rejectReasons,
+    storedDriversTotal: merged.length,
+    nextOffset: done ? null : nextOffset,
+    done: done
+  };
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
 // Install the 15-minute background sync trigger exactly once (idempotent).
 function ensureSyncTrigger_() {
   var props = PropertiesService.getScriptProperties();
