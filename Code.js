@@ -1108,6 +1108,26 @@ function logHermesExportCounts() {
   return summary;
 }
 
+function saveHermesExportEvents() {
+  var out = exportHermesEvents(30, false);
+  var name = 'hermes-rec-export-events-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') + '.json';
+  var file = DriveApp.createFile(name, JSON.stringify(out, null, 2), MimeType.PLAIN_TEXT);
+  var summary = {
+    ok: !!out.ok,
+    fileName: name,
+    fileId: file.getId(),
+    fileUrl: file.getUrl(),
+    version: out.version,
+    source: out.source,
+    driverCount: out.driverCount,
+    eventCount: out.eventCount,
+    warningCount: (out.warnings || []).length,
+    eventTypeCounts: hermesCountEventTypes_(out.events || [])
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
 function logHermesExportDiagnostics() {
   var props = PropertiesService.getScriptProperties();
   var diagnostics = {
