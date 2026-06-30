@@ -1180,7 +1180,16 @@ function saveHermesExportEventsOwnedRecruitersSample() {
 
 function isHermesOwnedRecruiter_(name) {
   var text = String(name || '').toLowerCase();
-  return /\brobert\b/.test(text) || /\blewis\b/.test(text) || /\bstephan\b/.test(text) || /\bstephen\b/.test(text);
+  return /\brobert\b/.test(text) ||
+    /\blewis\b/.test(text) ||
+    /\bstephan\b/.test(text) ||
+    /\bstephen\b/.test(text) ||
+    /ashurbekov\s+abdulaziz/.test(text) ||
+    /abdulaziz\s+ashurbekov/.test(text) ||
+    /baxtiyorov\s+sardor/.test(text) ||
+    /sardor\s+baxtiyorov/.test(text) ||
+    /rustam\s+bekniyozov/.test(text) ||
+    /bekniyozov\s+rustam/.test(text);
 }
 
 function buildHermesExportFromDrivers_(drivers, meta) {
