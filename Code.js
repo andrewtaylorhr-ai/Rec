@@ -1108,55 +1108,6 @@ function logHermesExportCounts() {
   return summary;
 }
 
-function saveHermesExportEvents() {
-  var out = exportHermesEvents(30, false);
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-30d');
-}
-
-function saveHermesExportEvents7d() {
-  var out = exportHermesEvents(7, false);
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-7d');
-}
-
-function saveHermesExportEventsSample() {
-  var sampleLimit = 25;
-  var out = exportHermesEventsLimited_(30, sampleLimit);
-  out.sampled = true;
-  out.sampleLimit = sampleLimit;
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-sample');
-}
-
-function saveHermesExportEvents1d() {
-  var out = exportHermesEventsLimited_(1, 50);
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-1d');
-}
-
-function logHermesDbSheetCounts() {
-  var drivers = getDriversFromSheet() || [];
-  var out = {
-    ok: true,
-    source: 'rec_db_sheet_only_no_gmail_sync',
-    dbDriverRows: drivers.length,
-    firstDate: drivers.length ? drivers[0].date || null : null,
-    lastDate: drivers.length ? drivers[drivers.length - 1].date || null : null
-  };
-  console.log(JSON.stringify(out, null, 2));
-  return out;
-}
-
-function saveHermesExportEventsDbSample() {
-  var drivers = getDriversFromSheet() || [];
-  var sampleLimit = 25;
-  var limitedDrivers = drivers.slice(0, sampleLimit);
-  var out = buildHermesExportFromDrivers_(limitedDrivers, {
-    source: 'rec_apps_script_db_sheet_only_no_gmail_sync',
-    totalAvailableDrivers: drivers.length,
-    sampled: true,
-    sampleLimit: sampleLimit
-  });
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-db-sample');
-}
-
 function saveHermesExportEventsGmailSample() {
   var sampleLimit = 25;
   var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
@@ -1212,34 +1163,6 @@ function buildHermesExportFromDrivers_(drivers, meta) {
   };
   for (var k in meta) if (meta.hasOwnProperty(k)) out[k] = meta[k];
   return out;
-}
-
-function exportHermesEventsLimited_(range, driverLimit) {
-  var drivers = fetchSubmissions(range || 30, false) || [];
-  var limitedDrivers = drivers.slice(0, driverLimit || 25);
-  var events = [];
-  var warnings = [];
-  for (var i = 0; i < limitedDrivers.length; i++) {
-    try {
-      var rowEvents = hermesEventsForDriver_(limitedDrivers[i]);
-      for (var j = 0; j < rowEvents.length; j++) events.push(rowEvents[j]);
-    } catch (e) {
-      warnings.push({ index: i, error: String(e) });
-    }
-  }
-  return {
-    ok: true,
-    version: HERMES_EVENT_VERSION,
-    source: 'rec_apps_script_email_threads',
-    generatedAt: new Date().toISOString(),
-    range: range || 30,
-    force: false,
-    driverCount: limitedDrivers.length,
-    totalAvailableDrivers: drivers.length,
-    eventCount: events.length,
-    events: events,
-    warnings: warnings
-  };
 }
 
 function saveHermesExportPayload_(out, prefix) {
