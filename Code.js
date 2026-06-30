@@ -1131,6 +1131,49 @@ function saveHermesExportEvents1d() {
   return saveHermesExportPayload_(out, 'hermes-rec-export-events-1d');
 }
 
+function logHermesDbSheetCounts() {
+  var drivers = getDriversFromSheet() || [];
+  var out = {
+    ok: true,
+    source: 'rec_db_sheet_only_no_gmail_sync',
+    dbDriverRows: drivers.length,
+    firstDate: drivers.length ? drivers[0].date || null : null,
+    lastDate: drivers.length ? drivers[drivers.length - 1].date || null : null
+  };
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+function saveHermesExportEventsDbSample() {
+  var drivers = getDriversFromSheet() || [];
+  var sampleLimit = 25;
+  var limitedDrivers = drivers.slice(0, sampleLimit);
+  var events = [];
+  var warnings = [];
+  for (var i = 0; i < limitedDrivers.length; i++) {
+    try {
+      var rowEvents = hermesEventsForDriver_(limitedDrivers[i]);
+      for (var j = 0; j < rowEvents.length; j++) events.push(rowEvents[j]);
+    } catch (e) {
+      warnings.push({ index: i, error: String(e) });
+    }
+  }
+  var out = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    source: 'rec_apps_script_db_sheet_only_no_gmail_sync',
+    generatedAt: new Date().toISOString(),
+    driverCount: limitedDrivers.length,
+    totalAvailableDrivers: drivers.length,
+    eventCount: events.length,
+    events: events,
+    warnings: warnings,
+    sampled: true,
+    sampleLimit: sampleLimit
+  };
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-db-sample');
+}
+
 function exportHermesEventsLimited_(range, driverLimit) {
   var drivers = fetchSubmissions(range || 30, false) || [];
   var limitedDrivers = drivers.slice(0, driverLimit || 25);
