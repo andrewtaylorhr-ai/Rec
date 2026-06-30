@@ -326,6 +326,69 @@ function syncToSheet(opts) {
 function seedSheet() { return syncToSheet({ full: true }); }       // full rebuild
 function installSyncTrigger() { return ensureSyncTrigger_(); }     // install the trigger
 
+function resetHermesSeedCursor() {
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty('HERMES_SEED_OFFSET');
+  console.log(JSON.stringify({ ok: true, reset: true }, null, 2));
+  return { ok: true, reset: true };
+}
+
+function seedSheetChunk() {
+  return seedSheetChunk_(200);
+}
+
+function seedSheetChunk_(chunkSize) {
+  chunkSize = chunkSize || 200;
+  var props = PropertiesService.getScriptProperties();
+  var offset = parseInt(props.getProperty('HERMES_SEED_OFFSET') || '0', 10) || 0;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, MAX_THREADS);
+  var slice = ids.slice(offset, offset + chunkSize);
+  var existing = getDriversFromSheet();
+  var byId = {};
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i] && existing[i].threadId) byId[existing[i].threadId] = existing[i];
+  }
+  var threads = batchGet(slice, 'threads');
+  var changed = 0;
+  var rejected = 0;
+  var rejectReasons = {};
+  for (var t = 0; t < threads.length; t++) {
+    if (!threads[t]) { rejected++; inc_(rejectReasons, 'thread_fetch_null'); continue; }
+    try {
+      var row = threadToDriverRow(threads[t]);
+      byId[row.threadId] = row;
+      changed++;
+    } catch (err) {
+      rejected++;
+      inc_(rejectReasons, String(err).substring(0, 140));
+    }
+  }
+  var merged = [];
+  for (var k in byId) { if (byId.hasOwnProperty(k)) merged.push(byId[k]); }
+  writeDriversToSheet_(merged);
+  var nextOffset = offset + slice.length;
+  var done = nextOffset >= ids.length || slice.length === 0;
+  if (done) props.deleteProperty('HERMES_SEED_OFFSET');
+  else props.setProperty('HERMES_SEED_OFFSET', String(nextOffset));
+  var out = {
+    ok: true,
+    query: query,
+    totalCandidateThreads: ids.length,
+    offsetStarted: offset,
+    chunkSize: chunkSize,
+    processedThisRun: slice.length,
+    changedThisRun: changed,
+    rejectedThisRun: rejected,
+    rejectReasons: rejectReasons,
+    storedDriversTotal: merged.length,
+    nextOffset: done ? null : nextOffset,
+    done: done
+  };
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
 // Install the 15-minute background sync trigger exactly once (idempotent).
 function ensureSyncTrigger_() {
   var props = PropertiesService.getScriptProperties();
@@ -424,13 +487,15 @@ function threadToDriverRow(thread) {
     var from = getHeader(p, 'From');
     var dms = parseInt(m.internalDate, 10);
     var snip = decodeEntities(m.snippet || '');
+    var body = i === 0 ? extractBody(p, m.id) : '';
+    if (!body) body = snip;
     msgObjs.push({
       from: from,
       sender: from,
       date: isNaN(dms) ? '' : new Date(dms).toISOString(),
       subject: getHeader(p, 'Subject'),
-      body: snip,
-      snippet: snip.substring(0, 320),
+      body: body,
+      snippet: String(body || snip).substring(0, 320),
       isSubmission: String(from).toLowerCase().indexOf(SUBMISSION_SENDER) >= 0
     });
   }
@@ -450,6 +515,9 @@ function threadToDriverRow(thread) {
     phone: parsed.phone,
     carrier: parsed.carrier,
     recruiter: parsed.recruiter,
+    job: parsed.job,
+    experience: parsed.experience,
+    zipCode: parsed.zipCode,
     message: parsed.message,
     messages: msgObjs,
     replyCount: Math.max(0, msgObjs.length - 1),
@@ -631,7 +699,7 @@ function permalinkFor(threadId) {
 }
 
 function parseSubmissionBody(body, subject, snippet) {
-  var out = { name: '', email: '', phone: '', carrier: '', recruiter: '', message: '' };
+  var out = { name: '', email: '', phone: '', carrier: '', recruiter: '', message: '', job: '', experience: '', zipCode: '' };
   var text = decodeEntities(((body || '') + '\n' + (snippet || '')).replace(/\r/g, ''));
   function grab(re) {
     var m = text.match(re);
@@ -640,8 +708,11 @@ function parseSubmissionBody(body, subject, snippet) {
   out.name      = grab(/Name:\s*([\s\S]*?)\s*(?:\n|Email:|Phone\b|Carrier:|Recruiter:|$)/i);
   out.email     = grab(/Email:\s*([^\s\n]*)/i);
   out.phone     = grab(/Phone\s*1?:\s*([0-9()+\-.\s]*?)\s*(?:\n|Carrier:|Recruiter:|Email:|Name:|$)/i);
-  out.carrier   = grab(/Carrier:\s*([\s\S]*?)\s*(?:\n|Recruiter:|Phone\b|Email:|Name:|$)/i);
-  out.recruiter = grab(/Recruiter:\s*([\s\S]*?)\s*(?:\n|Recruiter Message:|$)/i);
+  out.carrier   = grab(/Carrier:\s*([\s\S]*?)\s*(?:\n|Recruiter:|Job:|Experience:|Zip\b|Phone\b|Email:|Name:|$)/i);
+  out.recruiter = grab(/Recruiter:\s*([\s\S]*?)\s*(?:\n|Recruiter Message:|Job:|Experience:|Zip\b|$)/i);
+  out.job       = grab(/(?:Job|Position|Account):\s*([\s\S]*?)\s*(?:\n|Experience:|Zip\b|Recruiter Message:|Recruiter:|Carrier:|$)/i);
+  out.experience = grab(/(?:Experience|Exp):\s*([\s\S]*?)\s*(?:\n|Zip\b|Recruiter Message:|Recruiter:|Carrier:|Job:|$)/i);
+  out.zipCode   = grab(/(?:Zip(?:\s*Code)?|Postal(?:\s*Code)?):\s*([0-9]{5}(?:-[0-9]{4})?)\b/i);
   out.message   = grab(/Recruiter Message:\s*([\s\S]*?)(?:\n\s*(?:--|__|This message|Sent from|Application Info)|$)/i);
   if (!out.name || !out.carrier) {
     var sm = (subject || '').match(/New\s+(.+?)\s+submission for\s+(.+?)\s*-\s*Class A Recruiting/i);
@@ -653,6 +724,9 @@ function parseSubmissionBody(body, subject, snippet) {
   out.name = out.name.replace(/\s+/g, ' ').trim();
   out.carrier = out.carrier.replace(/\s+/g, ' ').trim();
   out.recruiter = out.recruiter.replace(/\s+/g, ' ').trim();
+  out.job = out.job.replace(/\s+/g, ' ').trim();
+  out.experience = out.experience.replace(/\s+/g, ' ').trim();
+  out.zipCode = out.zipCode.replace(/\s+/g, ' ').trim();
   return out;
 }
 
@@ -830,4 +904,639 @@ function _refreshNow() {
   } catch (err) {
     console.log('Could not clear cache: ' + err);
   }
+}
+
+// ===================================================================
+// HERMES READ-ONLY EVENT EXPORT
+// -------------------------------------------------------------------
+// Local-only addition for Recruiter Hermes integration. These functions do
+// not write to Gmail, Sheets, triggers, or Script Properties. They convert the
+// existing parsed email-thread rows into normalized event objects that Hermes
+// can consume, then test against demo Driver Management tabs.
+// ===================================================================
+
+var HERMES_EVENT_VERSION = 'rec-email-events-v1';
+
+function exportHermesEvents(range, force) {
+  var drivers = fetchSubmissions(range || 30, !!force) || [];
+  var events = [];
+  var warnings = [];
+  for (var i = 0; i < drivers.length; i++) {
+    try {
+      var rowEvents = hermesEventsForDriver_(drivers[i]);
+      for (var j = 0; j < rowEvents.length; j++) events.push(rowEvents[j]);
+    } catch (e) {
+      warnings.push({ index: i, error: String(e) });
+    }
+  }
+  return {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    source: 'rec_apps_script_email_threads',
+    generatedAt: new Date().toISOString(),
+    range: range || 30,
+    force: !!force,
+    driverCount: drivers.length,
+    eventCount: events.length,
+    events: events,
+    warnings: warnings
+  };
+}
+
+function hermesEventsForDriver_(driver) {
+  driver = driver || {};
+  var messages = driver.messages || [];
+  var text = hermesDriverText_(driver);
+  var stage = hermesClassifyStage_(driver, text);
+  var base = hermesBaseEvent_(driver, stage);
+  var events = [];
+
+  // Every valid parsed driver thread starts as one submission event. The
+  // threadId is the idempotency key so replies do not double-count submissions.
+  events.push(hermesBuildEvent_(base, 'submission', driver.date, [
+    'parsed_submission_thread',
+    driver.subject ? 'subject:' + String(driver.subject).substring(0, 80) : 'subject:missing'
+  ]));
+
+  if (stage.eventType && stage.eventType !== 'submission') {
+    events.push(hermesBuildEvent_(base, stage.eventType, stage.eventAt || driver.lastReplyAt || driver.date, stage.signals));
+  }
+
+  if (messages.length > 1 && !stage.eventType) {
+    events.push(hermesBuildEvent_(base, 'thread_update', driver.lastReplyAt || driver.date, [
+      'reply_count:' + String(Math.max(0, messages.length - 1))
+    ]));
+  }
+
+  return events;
+}
+
+function hermesBaseEvent_(driver, stage) {
+  return {
+    threadId: driver.threadId || '',
+    driverKey: hermesDriverKey_(driver),
+    driverName: driver.name || '',
+    email: driver.email || '',
+    phone: hermesNormalizePhone_(driver.phone || ''),
+    carrier: driver.carrier || '',
+    recruiter: driver.recruiter || '',
+    job: driver.job || '',
+    experience: driver.experience || '',
+    zipCode: driver.zipCode || '',
+    subject: driver.subject || '',
+    permalink: driver.permalink || '',
+    sourceStage: stage.stage || '',
+    confidence: stage.confidence || 'medium',
+    replyCount: Math.max(0, (driver.messages || []).length - 1),
+    lastReplyAt: driver.lastReplyAt || null
+  };
+}
+
+function hermesBuildEvent_(base, eventType, eventAt, signals) {
+  var out = {};
+  for (var k in base) if (base.hasOwnProperty(k)) out[k] = base[k];
+  out.eventType = eventType;
+  out.eventAt = eventAt || base.lastReplyAt || '';
+  out.signals = signals || [];
+  out.idempotencyKey = [eventType, base.threadId || base.driverKey || '', out.eventAt || ''].join(':');
+  return out;
+}
+
+function hermesClassifyStage_(driver, text) {
+  text = String(text || '').toLowerCase();
+  var stage = { stage: '', eventType: '', confidence: 'low', signals: [] };
+  function hit(type, label, patterns, confidence) {
+    for (var i = 0; i < patterns.length; i++) {
+      if (patterns[i].test(text)) {
+        stage.eventType = type;
+        stage.stage = label;
+        stage.confidence = confidence || 'medium';
+        stage.signals.push('pattern:' + patterns[i].source.substring(0, 80));
+        stage.eventAt = driver.lastReplyAt || driver.date || '';
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Highest priority terminal states first.
+  if (hit('hire', 'Hired', [
+    /\bhired\b/i,
+    /\bdriver\s+is\s+hired\b/i,
+    /\bcompleted\s+orientation\b/i,
+    /\breleased\s+to\s+dispatch\b/i,
+    /\bdispatched\b/i
+  ], 'medium')) return stage;
+
+  if (hit('dq_from_dqp', 'DQed', [
+    /\bdq(?:ed)?\b/i,
+    /\bnot\s+qualified\b/i,
+    /\bno\s*show\b/i,
+    /\bcarrier\s+(?:has\s+)?(?:chosen\s+to\s+)?pass(?:ed)?\b/i,
+    /\bpass\s+on\s+(?:the\s+)?driver\b/i,
+    /\bditched\s+us\b/i
+  ], 'medium')) return stage;
+
+  if (hit('needs_attention', 'Need Attention', [
+    /\bneed(?:s)?\s+attention\b/i,
+    /\bmissing\s+(?:doc|docs|document|documents)\b/i,
+    /\bneed(?:s)?\s+(?:doc|docs|document|documents)\b/i,
+    /\bwaiting\s+for\s+(?:rc|recruiter|documents|docs)\b/i,
+    /\bneed\s+to\s+reschedule\b/i,
+    /\breschedule\b/i
+  ], 'medium')) return stage;
+
+  if (hit('confirmed_dqp', 'Confirmed DQP', [
+    /\bdqp\s+confirmed\b/i,
+    /\bconfirmed\s+(?:for\s+)?(?:dqp|orientation)\b/i,
+    /\bscheduled\s+(?:for\s+)?(?:dqp|orientation)\b/i,
+    /\bat\s+(?:the\s+)?orientation\b/i,
+    /\bshow\b/i,
+    /\bapproved\b/i
+  ], 'medium')) return stage;
+
+  stage.stage = 'Submitted';
+  stage.confidence = 'medium';
+  stage.signals.push('default:submission_thread');
+  return stage;
+}
+
+function hermesDriverText_(driver) {
+  var parts = [driver.subject || '', driver.snippet || '', driver.message || ''];
+  var messages = driver.messages || [];
+  for (var i = 0; i < messages.length; i++) {
+    parts.push(messages[i].subject || '');
+    parts.push(messages[i].snippet || '');
+    parts.push(messages[i].body || '');
+  }
+  return parts.join('\n');
+}
+
+function hermesNormalizePhone_(phone) {
+  var digits = String(phone || '').replace(/[^0-9]/g, '');
+  if (digits.length === 11 && digits.charAt(0) === '1') digits = digits.slice(1);
+  return digits;
+}
+
+function hermesDriverKey_(driver) {
+  var phone = hermesNormalizePhone_(driver && driver.phone);
+  if (phone) return 'phone:' + phone;
+  var email = String((driver && driver.email) || '').toLowerCase().trim();
+  if (email) return 'email:' + email;
+  var name = String((driver && driver.name) || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return name ? 'name:' + name : 'thread:' + String((driver && driver.threadId) || 'unknown');
+}
+
+function _hermesExportSelftest() {
+  var sample = {
+    threadId: 'sample-thread',
+    date: '2026-06-29T12:00:00.000Z',
+    subject: 'New Swift submission for Test Driver - Class A Recruiting',
+    name: 'Test Driver',
+    phone: '(555) 123-4567',
+    carrier: 'Swift',
+    recruiter: 'Robert',
+    messages: [
+      { subject: 'New Swift submission', body: 'Application Info\nName: Test Driver\nPhone 1: 5551234567', date: '2026-06-29T12:00:00.000Z' },
+      { subject: 'Re: New Swift submission', body: 'Driver is confirmed for DQP orientation Monday.', date: '2026-06-29T13:00:00.000Z' }
+    ],
+    lastReplyAt: '2026-06-29T13:00:00.000Z'
+  };
+  var events = hermesEventsForDriver_(sample);
+  console.log(JSON.stringify(events));
+  return events;
+}
+
+function logHermesExportCounts() {
+  var out = exportHermesEvents(30, false);
+  var summary = {
+    ok: !!out.ok,
+    version: out.version,
+    source: out.source,
+    driverCount: out.driverCount,
+    eventCount: out.eventCount,
+    warningCount: (out.warnings || []).length,
+    eventTypeCounts: hermesCountEventTypes_(out.events || [])
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+function saveHermesExportEventsGmailSample() {
+  var sampleLimit = 25;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, sampleLimit);
+  var threads = batchGet(ids, 'threads');
+  var drivers = [];
+  var warnings = [];
+  for (var i = 0; i < threads.length; i++) {
+    if (!threads[i]) {
+      warnings.push({ index: i, error: 'thread_fetch_null' });
+      continue;
+    }
+    try {
+      drivers.push(threadToDriverRow(threads[i]));
+    } catch (e) {
+      warnings.push({ index: i, error: String(e) });
+    }
+  }
+  var out = buildHermesExportFromDrivers_(drivers, {
+    source: 'rec_apps_script_gmail_direct_sample_no_sheet_seed',
+    query: query,
+    totalCandidateThreads: ids.length,
+    fetchedThreads: threads.length,
+    sampled: true,
+    sampleLimit: sampleLimit
+  });
+  out.warnings = (out.warnings || []).concat(warnings);
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-gmail-sample');
+}
+
+function saveHermesExportEventsOwnedRecruitersSample() {
+  return saveHermesExportEventsForRecruiter_('owned-recruiters', isHermesOwnedRecruiter_, 25, 500, ['Robert', 'Lewis', 'Stephan', 'Stephen']);
+}
+
+function saveHermesExportEventsLewisSample() {
+  return saveHermesExportEventsForRecruiter_('lewis', isHermesLewisRecruiter_, 25, 1200, ['Lewis', 'Ashurbekov Abdulaziz']);
+}
+
+function saveHermesExportEventsForRecruiter_(slug, matcher, sampleLimit, scanLimit, recruiterLabels) {
+  var batchSize = 25;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, scanLimit);
+  var drivers = [];
+  var warnings = [];
+  var scannedThreads = 0;
+  for (var start = 0; start < ids.length && drivers.length < sampleLimit; start += batchSize) {
+    var batchIds = ids.slice(start, start + batchSize);
+    var threads = batchGet(batchIds, 'threads');
+    scannedThreads += threads.length;
+    for (var i = 0; i < threads.length && drivers.length < sampleLimit; i++) {
+      if (!threads[i]) {
+        warnings.push({ index: start + i, error: 'thread_fetch_null' });
+        continue;
+      }
+      try {
+        var row = threadToDriverRow(threads[i]);
+        if (matcher(row.recruiter)) drivers.push(row);
+      } catch (e) {
+        warnings.push({ index: start + i, error: String(e) });
+      }
+    }
+  }
+  var out = buildHermesExportFromDrivers_(drivers, {
+    source: 'rec_apps_script_gmail_' + slug + '_sample_no_sheet_seed',
+    query: query,
+    scanLimit: scanLimit,
+    scannedThreads: scannedThreads,
+    matchedDrivers: drivers.length,
+    sampled: true,
+    sampleLimit: sampleLimit,
+    recruiterLabels: recruiterLabels || []
+  });
+  out.warnings = (out.warnings || []).concat(warnings);
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-' + slug + '-sample');
+}
+
+function isHermesOwnedRecruiter_(name) {
+  var text = String(name || '').toLowerCase();
+  return /\brobert\b/.test(text) ||
+    /\blewis\b/.test(text) ||
+    /\bstephan\b/.test(text) ||
+    /\bstephen\b/.test(text) ||
+    /ashurbekov\s+abdulaziz/.test(text) ||
+    /abdulaziz\s+ashurbekov/.test(text) ||
+    /baxtiyorov\s+sardor/.test(text) ||
+    /sardor\s+baxtiyorov/.test(text) ||
+    /rustam\s+bekniyozov/.test(text) ||
+    /bekniyozov\s+rustam/.test(text);
+}
+
+function isHermesLewisRecruiter_(name) {
+  var text = String(name || '').toLowerCase();
+  return /\blewis\b/.test(text) || /ashurbekov\s+abdulaziz/.test(text) || /abdulaziz\s+ashurbekov/.test(text);
+}
+
+function buildHermesExportFromDrivers_(drivers, meta) {
+  drivers = drivers || [];
+  meta = meta || {};
+  var events = [];
+  var warnings = [];
+  for (var i = 0; i < drivers.length; i++) {
+    try {
+      var rowEvents = hermesEventsForDriver_(drivers[i]);
+      for (var j = 0; j < rowEvents.length; j++) events.push(rowEvents[j]);
+    } catch (e) {
+      warnings.push({ index: i, error: String(e) });
+    }
+  }
+  var out = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    source: meta.source || 'rec_apps_script_email_threads',
+    generatedAt: new Date().toISOString(),
+    driverCount: drivers.length,
+    eventCount: events.length,
+    events: events,
+    warnings: warnings
+  };
+  for (var k in meta) if (meta.hasOwnProperty(k)) out[k] = meta[k];
+  return out;
+}
+
+function saveHermesExportPayload_(out, prefix) {
+  var name = prefix + '-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') + '.json';
+  var file = DriveApp.createFile(name, JSON.stringify(out, null, 2), MimeType.PLAIN_TEXT);
+  var summary = {
+    ok: !!out.ok,
+    fileName: name,
+    fileId: file.getId(),
+    fileUrl: file.getUrl(),
+    version: out.version,
+    source: out.source,
+    driverCount: out.driverCount,
+    eventCount: out.eventCount,
+    warningCount: (out.warnings || []).length,
+    sampled: !!out.sampled,
+    sampleLimit: out.sampleLimit || null,
+    eventTypeCounts: hermesCountEventTypes_(out.events || [])
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+function logHermesExportDiagnostics() {
+  var props = PropertiesService.getScriptProperties();
+  var diagnostics = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    dbSheetIdPresent: !!props.getProperty('DB_SHEET_ID'),
+    dbSyncedAt: props.getProperty('DB_SYNCED_AT') || null,
+    syncTriggerOn: props.getProperty('SYNC_TRIGGER_ON') || null,
+    syncInfo: null,
+    sheetRowsTotal: null,
+    ranges: {},
+    gmailQueryCounts: {},
+    seedPreview: null
+  };
+
+  try { diagnostics.syncInfo = getSyncInfo(); } catch (e) { diagnostics.syncInfo = { error: String(e) }; }
+  try { diagnostics.sheetRowsTotal = getDriversFromSheet().length; } catch (e2) { diagnostics.sheetRowsTotal = { error: String(e2) }; }
+
+  [30, 90, 180, 365, 9999].forEach(function(days) {
+    try {
+      var out = exportHermesEvents(days, false);
+      diagnostics.ranges[String(days)] = {
+        driverCount: out.driverCount,
+        eventCount: out.eventCount,
+        warningCount: (out.warnings || []).length,
+        eventTypeCounts: hermesCountEventTypes_(out.events || [])
+      };
+    } catch (e3) {
+      diagnostics.ranges[String(days)] = { error: String(e3) };
+    }
+  });
+
+  var queries = {
+    fullSubmissionThreads: 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START,
+    recentSubmissionThreads: 'from:' + SUBMISSION_SENDER + ' subject:submission newer_than:30d after:' + DATA_START,
+    senderOnlyRecent: 'from:' + SUBMISSION_SENDER + ' newer_than:30d',
+    submissionSubjectRecent: 'subject:submission newer_than:30d'
+  };
+  for (var name in queries) {
+    if (!queries.hasOwnProperty(name)) continue;
+    try { diagnostics.gmailQueryCounts[name] = listThreadIds(queries[name], 20).length; }
+    catch (e4) { diagnostics.gmailQueryCounts[name] = { error: String(e4) }; }
+  }
+
+  console.log(JSON.stringify(diagnostics, null, 2));
+  return diagnostics;
+}
+
+function logHermesEmailFormatDiscovery() {
+  var discovery = discoverHermesEmailFormats_(20000);
+  console.log(JSON.stringify(discovery, null, 2));
+  return discovery;
+}
+
+function saveHermesEmailFormatDiscovery() {
+  var discovery = discoverHermesEmailFormats_(20000);
+  var name = 'hermes-email-format-discovery-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') + '.json';
+  var file = DriveApp.createFile(name, JSON.stringify(discovery, null, 2), MimeType.PLAIN_TEXT);
+  var summary = {
+    ok: true,
+    fileName: name,
+    fileId: file.getId(),
+    fileUrl: file.getUrl(),
+    knownSenderTotal: ((discovery.querySummaries || {}).known_sender_all || {}).totalMessages || 0,
+    subjectSubmissionTotal: ((discovery.querySummaries || {}).subject_submission_all || {}).totalMessages || 0,
+    likelyFormatIssues: discovery.likelyFormatIssues || []
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+function logHermesSubmissionParseDiagnostics() {
+  var out = diagnoseHermesSubmissionParsing_(250);
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+function diagnoseHermesSubmissionParsing_(limit) {
+  limit = limit || 250;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, limit);
+  var threads = batchGet(ids, 'threads');
+  var out = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    query: query,
+    candidateThreads: ids.length,
+    fetchedThreads: threads.length,
+    parsed: 0,
+    rejected: 0,
+    rejectReasons: {},
+    firstMessageSignals: {
+      hasApplicationInfo: 0,
+      hasPhone: 0,
+      hasRecruiter: 0,
+      hasCarrier: 0,
+      notificationLike: 0,
+      emptySnippet: 0
+    }
+  };
+  for (var i = 0; i < threads.length; i++) {
+    var th = threads[i];
+    if (!th) {
+      out.rejected++;
+      inc_(out.rejectReasons, 'thread_fetch_null');
+      continue;
+    }
+    try {
+      var raw = (th.messages || []).slice();
+      raw.sort(function(a, b) { return (parseInt(a.internalDate, 10) || 0) - (parseInt(b.internalDate, 10) || 0); });
+      var first = raw[0] || {};
+      var p = first.payload || {};
+      var subj = getHeader(p, 'Subject') || '';
+      var snip = decodeEntities(first.snippet || '');
+      var text = (subj + ' ' + snip).toLowerCase();
+      if (!snip) out.firstMessageSignals.emptySnippet++;
+      if (text.indexOf('application info') >= 0) out.firstMessageSignals.hasApplicationInfo++;
+      if (/\bphone\b|phone\s*1/.test(text)) out.firstMessageSignals.hasPhone++;
+      if (/\brecruiter\b/.test(text)) out.firstMessageSignals.hasRecruiter++;
+      if (/\bcarrier\b|swift|pam|usx|u\.s\.\s*xpress|us xpress/.test(text)) out.firstMessageSignals.hasCarrier++;
+      if (isNotificationEmail(subj, snip)) out.firstMessageSignals.notificationLike++;
+      threadToDriverRow(th);
+      out.parsed++;
+    } catch (e) {
+      out.rejected++;
+      inc_(out.rejectReasons, String(e).substring(0, 140));
+    }
+  }
+  return out;
+}
+
+function discoverHermesEmailFormats_(maxMessages) {
+  var queries = {
+    known_sender_all: 'from:' + SUBMISSION_SENDER + ' after:' + DATA_START,
+    subject_submission_all: 'subject:submission after:' + DATA_START,
+    application_terms_all: '(submission OR application OR driver OR orientation OR DQP OR hired OR DQed OR scheduled OR confirmed) after:' + DATA_START,
+    recent_any_30d: '(submission OR application OR driver OR orientation OR DQP OR hired OR scheduled OR confirmed) newer_than:30d'
+  };
+  var out = {
+    ok: true,
+    version: HERMES_EVENT_VERSION,
+    generatedAt: new Date().toISOString(),
+    maxMessages: maxMessages || 20000,
+    senderConfigured: SUBMISSION_SENDER,
+    dataStart: DATA_START,
+    querySummaries: {},
+    likelyFormatIssues: []
+  };
+  for (var qname in queries) {
+    if (!queries.hasOwnProperty(qname)) continue;
+    try {
+      out.querySummaries[qname] = summarizeGmailMessageFormats_(queries[qname], maxMessages || 20000);
+    } catch (e) {
+      out.querySummaries[qname] = { error: String(e) };
+    }
+  }
+  var known = out.querySummaries.known_sender_all || {};
+  var subj = out.querySummaries.subject_submission_all || {};
+  if ((known.totalMessages || 0) === 0) out.likelyFormatIssues.push('configured sender returned zero messages');
+  if ((subj.totalMessages || 0) > (known.totalMessages || 0) * 2) out.likelyFormatIssues.push('subject:submission matches many more messages than configured sender');
+  if ((known.totalMessages || 0) > 0 && (known.bodySignalCounts && (known.bodySignalCounts.applicationInfo || 0) === 0)) out.likelyFormatIssues.push('configured sender messages do not show application-info signal in snippets');
+  return out;
+}
+
+function summarizeGmailMessageFormats_(query, maxMessages) {
+  var ids = listMessageIds(query, maxMessages || 20000);
+  var sampleIds = ids.slice(0, Math.min(ids.length, 250));
+  var messages = batchGet(sampleIds, 'messages');
+  var senders = {};
+  var subjectPrefixes = {};
+  var subjectTokens = {};
+  var bodySignals = {
+    applicationInfo: 0,
+    phone: 0,
+    recruiter: 0,
+    carrier: 0,
+    orientation: 0,
+    dqp: 0,
+    scheduled: 0,
+    confirmed: 0,
+    hired: 0,
+    dq: 0,
+    noShow: 0,
+    documents: 0
+  };
+  var parseSignals = { parseableSubmission: 0, notificationLike: 0, unknownLike: 0 };
+  for (var i = 0; i < messages.length; i++) {
+    var m = messages[i];
+    if (!m) continue;
+    var p = m.payload || {};
+    var from = sanitizeEmailForDiscovery_(getHeader(p, 'From'));
+    var subj = getHeader(p, 'Subject') || '';
+    var snip = decodeEntities(m.snippet || '');
+    inc_(senders, from || '(unknown)');
+    inc_(subjectPrefixes, subjectPrefixForDiscovery_(subj));
+    var toks = subjectTokensForDiscovery_(subj);
+    for (var t = 0; t < toks.length; t++) inc_(subjectTokens, toks[t]);
+    var text = (subj + ' ' + snip).toLowerCase();
+    if (text.indexOf('application info') >= 0) bodySignals.applicationInfo++;
+    if (/\bphone\b|phone\s*1|mobile|cell/.test(text)) bodySignals.phone++;
+    if (/\brecruiter\b/.test(text)) bodySignals.recruiter++;
+    if (/\bcarrier\b|swift|pam|usx|u\.s\.\s*xpress|us xpress/.test(text)) bodySignals.carrier++;
+    if (/\borientation\b/.test(text)) bodySignals.orientation++;
+    if (/\bdqp\b/.test(text)) bodySignals.dqp++;
+    if (/\bscheduled\b/.test(text)) bodySignals.scheduled++;
+    if (/\bconfirmed\b/.test(text)) bodySignals.confirmed++;
+    if (/\bhired\b|dispatch/.test(text)) bodySignals.hired++;
+    if (/\bdq\b|dqed|not qualified/.test(text)) bodySignals.dq++;
+    if (/no\s*show/.test(text)) bodySignals.noShow++;
+    if (/doc|document|missing/.test(text)) bodySignals.documents++;
+    if (isNotificationEmail(subj, snip)) parseSignals.notificationLike++;
+    else if (text.indexOf('application info') >= 0 || /\bname\b.*\bphone\b/.test(text)) parseSignals.parseableSubmission++;
+    else parseSignals.unknownLike++;
+  }
+  return {
+    query: query,
+    totalMessages: ids.length,
+    sampledMessages: messages.length,
+    topSenders: topCounts_(senders, 20),
+    topSubjectPrefixes: topCounts_(subjectPrefixes, 30),
+    topSubjectTokens: topCounts_(subjectTokens, 30),
+    bodySignalCounts: bodySignals,
+    parseSignalCounts: parseSignals
+  };
+}
+
+function sanitizeEmailForDiscovery_(from) {
+  from = String(from || '').toLowerCase();
+  var m = from.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/);
+  if (!m) return '(unknown)';
+  var parts = m[0].split('@');
+  var local = parts[0] || '';
+  var safeLocal = local.length <= 3 ? local.charAt(0) + '***' : local.substring(0, 3) + '***';
+  return safeLocal + '@' + parts[1];
+}
+
+function subjectPrefixForDiscovery_(subject) {
+  subject = String(subject || '').replace(/\s+/g, ' ').trim();
+  subject = subject.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]');
+  subject = subject.replace(/\b\+?1?\s*\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}\b/g, '[phone]');
+  subject = subject.replace(/\b[A-Z][a-z]+\s+[A-Z][a-z]+\b/g, '[Name]');
+  return subject.substring(0, 90) || '(empty)';
+}
+
+function subjectTokensForDiscovery_(subject) {
+  var stop = { the:1, and:1, for:1, with:1, from:1, re:1, fw:1, fwd:1, new:1, your:1, you:1, are:1, has:1, have:1, this:1, that:1 };
+  var words = String(subject || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/);
+  var out = [];
+  for (var i = 0; i < words.length; i++) {
+    var w = words[i];
+    if (w.length < 3 || stop[w]) continue;
+    out.push(w);
+  }
+  return out.slice(0, 12);
+}
+
+function inc_(obj, key) {
+  obj[key] = (obj[key] || 0) + 1;
+}
+
+function topCounts_(obj, n) {
+  var arr = [];
+  for (var k in obj) if (obj.hasOwnProperty(k)) arr.push({ value: k, count: obj[k] });
+  arr.sort(function(a, b) { return b.count - a.count || String(a.value).localeCompare(String(b.value)); });
+  return arr.slice(0, n || 20);
+}
+
+function hermesCountEventTypes_(events) {
+  var counts = {};
+  for (var i = 0; i < events.length; i++) {
+    var t = events[i] && events[i].eventType ? events[i].eventType : 'unknown';
+    counts[t] = (counts[t] || 0) + 1;
+  }
+  return counts;
 }
