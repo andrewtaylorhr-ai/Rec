@@ -1139,8 +1139,14 @@ function saveHermesExportEventsGmailSample() {
 }
 
 function saveHermesExportEventsOwnedRecruitersSample() {
-  var sampleLimit = 25;
-  var scanLimit = 500;
+  return saveHermesExportEventsForRecruiter_('owned-recruiters', isHermesOwnedRecruiter_, 25, 500, ['Robert', 'Lewis', 'Stephan', 'Stephen']);
+}
+
+function saveHermesExportEventsLewisSample() {
+  return saveHermesExportEventsForRecruiter_('lewis', isHermesLewisRecruiter_, 25, 1200, ['Lewis', 'Ashurbekov Abdulaziz']);
+}
+
+function saveHermesExportEventsForRecruiter_(slug, matcher, sampleLimit, scanLimit, recruiterLabels) {
   var batchSize = 25;
   var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
   var ids = listThreadIds(query, scanLimit);
@@ -1158,24 +1164,24 @@ function saveHermesExportEventsOwnedRecruitersSample() {
       }
       try {
         var row = threadToDriverRow(threads[i]);
-        if (isHermesOwnedRecruiter_(row.recruiter)) drivers.push(row);
+        if (matcher(row.recruiter)) drivers.push(row);
       } catch (e) {
         warnings.push({ index: start + i, error: String(e) });
       }
     }
   }
   var out = buildHermesExportFromDrivers_(drivers, {
-    source: 'rec_apps_script_gmail_owned_recruiter_sample_no_sheet_seed',
+    source: 'rec_apps_script_gmail_' + slug + '_sample_no_sheet_seed',
     query: query,
     scanLimit: scanLimit,
     scannedThreads: scannedThreads,
     matchedDrivers: drivers.length,
     sampled: true,
     sampleLimit: sampleLimit,
-    ownedRecruiters: ['Robert', 'Lewis', 'Stephan', 'Stephen']
+    recruiterLabels: recruiterLabels || []
   });
   out.warnings = (out.warnings || []).concat(warnings);
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-owned-recruiters-sample');
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-' + slug + '-sample');
 }
 
 function isHermesOwnedRecruiter_(name) {
@@ -1190,6 +1196,11 @@ function isHermesOwnedRecruiter_(name) {
     /sardor\s+baxtiyorov/.test(text) ||
     /rustam\s+bekniyozov/.test(text) ||
     /bekniyozov\s+rustam/.test(text);
+}
+
+function isHermesLewisRecruiter_(name) {
+  var text = String(name || '').toLowerCase();
+  return /\blewis\b/.test(text) || /ashurbekov\s+abdulaziz/.test(text) || /abdulaziz\s+ashurbekov/.test(text);
 }
 
 function buildHermesExportFromDrivers_(drivers, meta) {
