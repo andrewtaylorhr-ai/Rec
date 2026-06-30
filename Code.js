@@ -487,13 +487,15 @@ function threadToDriverRow(thread) {
     var from = getHeader(p, 'From');
     var dms = parseInt(m.internalDate, 10);
     var snip = decodeEntities(m.snippet || '');
+    var body = i === 0 ? extractBody(p, m.id) : '';
+    if (!body) body = snip;
     msgObjs.push({
       from: from,
       sender: from,
       date: isNaN(dms) ? '' : new Date(dms).toISOString(),
       subject: getHeader(p, 'Subject'),
-      body: snip,
-      snippet: snip.substring(0, 320),
+      body: body,
+      snippet: String(body || snip).substring(0, 320),
       isSubmission: String(from).toLowerCase().indexOf(SUBMISSION_SENDER) >= 0
     });
   }
@@ -513,6 +515,9 @@ function threadToDriverRow(thread) {
     phone: parsed.phone,
     carrier: parsed.carrier,
     recruiter: parsed.recruiter,
+    job: parsed.job,
+    experience: parsed.experience,
+    zipCode: parsed.zipCode,
     message: parsed.message,
     messages: msgObjs,
     replyCount: Math.max(0, msgObjs.length - 1),
@@ -694,7 +699,7 @@ function permalinkFor(threadId) {
 }
 
 function parseSubmissionBody(body, subject, snippet) {
-  var out = { name: '', email: '', phone: '', carrier: '', recruiter: '', message: '' };
+  var out = { name: '', email: '', phone: '', carrier: '', recruiter: '', message: '', job: '', experience: '', zipCode: '' };
   var text = decodeEntities(((body || '') + '\n' + (snippet || '')).replace(/\r/g, ''));
   function grab(re) {
     var m = text.match(re);
@@ -703,8 +708,11 @@ function parseSubmissionBody(body, subject, snippet) {
   out.name      = grab(/Name:\s*([\s\S]*?)\s*(?:\n|Email:|Phone\b|Carrier:|Recruiter:|$)/i);
   out.email     = grab(/Email:\s*([^\s\n]*)/i);
   out.phone     = grab(/Phone\s*1?:\s*([0-9()+\-.\s]*?)\s*(?:\n|Carrier:|Recruiter:|Email:|Name:|$)/i);
-  out.carrier   = grab(/Carrier:\s*([\s\S]*?)\s*(?:\n|Recruiter:|Phone\b|Email:|Name:|$)/i);
-  out.recruiter = grab(/Recruiter:\s*([\s\S]*?)\s*(?:\n|Recruiter Message:|$)/i);
+  out.carrier   = grab(/Carrier:\s*([\s\S]*?)\s*(?:\n|Recruiter:|Job:|Experience:|Zip\b|Phone\b|Email:|Name:|$)/i);
+  out.recruiter = grab(/Recruiter:\s*([\s\S]*?)\s*(?:\n|Recruiter Message:|Job:|Experience:|Zip\b|$)/i);
+  out.job       = grab(/(?:Job|Position|Account):\s*([\s\S]*?)\s*(?:\n|Experience:|Zip\b|Recruiter Message:|Recruiter:|Carrier:|$)/i);
+  out.experience = grab(/(?:Experience|Exp):\s*([\s\S]*?)\s*(?:\n|Zip\b|Recruiter Message:|Recruiter:|Carrier:|Job:|$)/i);
+  out.zipCode   = grab(/(?:Zip(?:\s*Code)?|Postal(?:\s*Code)?):\s*([0-9]{5}(?:-[0-9]{4})?)\b/i);
   out.message   = grab(/Recruiter Message:\s*([\s\S]*?)(?:\n\s*(?:--|__|This message|Sent from|Application Info)|$)/i);
   if (!out.name || !out.carrier) {
     var sm = (subject || '').match(/New\s+(.+?)\s+submission for\s+(.+?)\s*-\s*Class A Recruiting/i);
@@ -716,6 +724,9 @@ function parseSubmissionBody(body, subject, snippet) {
   out.name = out.name.replace(/\s+/g, ' ').trim();
   out.carrier = out.carrier.replace(/\s+/g, ' ').trim();
   out.recruiter = out.recruiter.replace(/\s+/g, ' ').trim();
+  out.job = out.job.replace(/\s+/g, ' ').trim();
+  out.experience = out.experience.replace(/\s+/g, ' ').trim();
+  out.zipCode = out.zipCode.replace(/\s+/g, ' ').trim();
   return out;
 }
 
@@ -969,6 +980,9 @@ function hermesBaseEvent_(driver, stage) {
     phone: hermesNormalizePhone_(driver.phone || ''),
     carrier: driver.carrier || '',
     recruiter: driver.recruiter || '',
+    job: driver.job || '',
+    experience: driver.experience || '',
+    zipCode: driver.zipCode || '',
     subject: driver.subject || '',
     permalink: driver.permalink || '',
     sourceStage: stage.stage || '',
