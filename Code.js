@@ -1148,11 +1148,53 @@ function saveHermesExportEventsDbSample() {
   var drivers = getDriversFromSheet() || [];
   var sampleLimit = 25;
   var limitedDrivers = drivers.slice(0, sampleLimit);
+  var out = buildHermesExportFromDrivers_(limitedDrivers, {
+    source: 'rec_apps_script_db_sheet_only_no_gmail_sync',
+    totalAvailableDrivers: drivers.length,
+    sampled: true,
+    sampleLimit: sampleLimit
+  });
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-db-sample');
+}
+
+function saveHermesExportEventsGmailSample() {
+  var sampleLimit = 25;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, sampleLimit);
+  var threads = batchGet(ids, 'threads');
+  var drivers = [];
+  var warnings = [];
+  for (var i = 0; i < threads.length; i++) {
+    if (!threads[i]) {
+      warnings.push({ index: i, error: 'thread_fetch_null' });
+      continue;
+    }
+    try {
+      drivers.push(threadToDriverRow(threads[i]));
+    } catch (e) {
+      warnings.push({ index: i, error: String(e) });
+    }
+  }
+  var out = buildHermesExportFromDrivers_(drivers, {
+    source: 'rec_apps_script_gmail_direct_sample_no_sheet_seed',
+    query: query,
+    totalCandidateThreads: ids.length,
+    fetchedThreads: threads.length,
+    sampled: true,
+    sampleLimit: sampleLimit
+  });
+  out.warnings = (out.warnings || []).concat(warnings);
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-gmail-sample');
+}
+
+function buildHermesExportFromDrivers_(drivers, meta) {
+  drivers = drivers || [];
+  meta = meta || {};
   var events = [];
   var warnings = [];
-  for (var i = 0; i < limitedDrivers.length; i++) {
+  for (var i = 0; i < drivers.length; i++) {
     try {
-      var rowEvents = hermesEventsForDriver_(limitedDrivers[i]);
+      var rowEvents = hermesEventsForDriver_(drivers[i]);
       for (var j = 0; j < rowEvents.length; j++) events.push(rowEvents[j]);
     } catch (e) {
       warnings.push({ index: i, error: String(e) });
@@ -1161,17 +1203,15 @@ function saveHermesExportEventsDbSample() {
   var out = {
     ok: true,
     version: HERMES_EVENT_VERSION,
-    source: 'rec_apps_script_db_sheet_only_no_gmail_sync',
+    source: meta.source || 'rec_apps_script_email_threads',
     generatedAt: new Date().toISOString(),
-    driverCount: limitedDrivers.length,
-    totalAvailableDrivers: drivers.length,
+    driverCount: drivers.length,
     eventCount: events.length,
     events: events,
-    warnings: warnings,
-    sampled: true,
-    sampleLimit: sampleLimit
+    warnings: warnings
   };
-  return saveHermesExportPayload_(out, 'hermes-rec-export-events-db-sample');
+  for (var k in meta) if (meta.hasOwnProperty(k)) out[k] = meta[k];
+  return out;
 }
 
 function exportHermesEventsLimited_(range, driverLimit) {
