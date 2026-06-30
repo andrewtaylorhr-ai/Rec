@@ -1138,6 +1138,51 @@ function saveHermesExportEventsGmailSample() {
   return saveHermesExportPayload_(out, 'hermes-rec-export-events-gmail-sample');
 }
 
+function saveHermesExportEventsOwnedRecruitersSample() {
+  var sampleLimit = 25;
+  var scanLimit = 500;
+  var batchSize = 25;
+  var query = 'from:' + SUBMISSION_SENDER + ' subject:submission after:' + DATA_START;
+  var ids = listThreadIds(query, scanLimit);
+  var drivers = [];
+  var warnings = [];
+  var scannedThreads = 0;
+  for (var start = 0; start < ids.length && drivers.length < sampleLimit; start += batchSize) {
+    var batchIds = ids.slice(start, start + batchSize);
+    var threads = batchGet(batchIds, 'threads');
+    scannedThreads += threads.length;
+    for (var i = 0; i < threads.length && drivers.length < sampleLimit; i++) {
+      if (!threads[i]) {
+        warnings.push({ index: start + i, error: 'thread_fetch_null' });
+        continue;
+      }
+      try {
+        var row = threadToDriverRow(threads[i]);
+        if (isHermesOwnedRecruiter_(row.recruiter)) drivers.push(row);
+      } catch (e) {
+        warnings.push({ index: start + i, error: String(e) });
+      }
+    }
+  }
+  var out = buildHermesExportFromDrivers_(drivers, {
+    source: 'rec_apps_script_gmail_owned_recruiter_sample_no_sheet_seed',
+    query: query,
+    scanLimit: scanLimit,
+    scannedThreads: scannedThreads,
+    matchedDrivers: drivers.length,
+    sampled: true,
+    sampleLimit: sampleLimit,
+    ownedRecruiters: ['Robert', 'Lewis', 'Stephan', 'Stephen']
+  });
+  out.warnings = (out.warnings || []).concat(warnings);
+  return saveHermesExportPayload_(out, 'hermes-rec-export-events-owned-recruiters-sample');
+}
+
+function isHermesOwnedRecruiter_(name) {
+  var text = String(name || '').toLowerCase();
+  return /\brobert\b/.test(text) || /\blewis\b/.test(text) || /\bstephan\b/.test(text) || /\bstephen\b/.test(text);
+}
+
 function buildHermesExportFromDrivers_(drivers, meta) {
   drivers = drivers || [];
   meta = meta || {};
