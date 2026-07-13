@@ -351,7 +351,11 @@ function getSyncInfo() {
 
 // ---- fetchSubmissions: now reads from the Sheet (instant), filtered by range ----
 function fetchSubmissions(range, force) {
-  if (force) { try { syncToSheet(); } catch (e) {} }
+  // NOTE: never run a Gmail sync synchronously here. Doing so blocks the web
+  // request long enough to time out (browser sees "HTTP 0"). The 15-min trigger
+  // keeps the Sheet fresh; the "Refresh from Gmail" button calls refreshNow()
+  // in its own request. The `force` flag is accepted for backward-compat and
+  // intentionally ignored on the read path.
   var all = getDriversFromSheet();
   // First ever load: Sheet is empty -> do one full seed so the app is never blank.
   if (!all.length) {
@@ -382,6 +386,20 @@ function fetchSubmissions(range, force) {
   }
   out.sort(function (a, b) { return (b.date || '').localeCompare(a.date || ''); });
   return out;
+}
+
+// Called by the "Refresh from Gmail" button in its OWN google.script.run request
+// (separate from the data read, so a slow/failed sync can never break the
+// dashboard load). Runs the bounded incremental sync (newer_than window) and
+// returns a small status object. The frontend re-reads via fetchSubmissions on
+// success.
+function refreshNow() {
+  try {
+    var res = syncToSheet();
+    return res || { ok: false, error: 'no-result' };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 // Return true if the email body looks like a system notification, not a real

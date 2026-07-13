@@ -1067,6 +1067,25 @@ async function fetchAllSubmissions(windowDays, force) {
   });
 }
 
+// Ask the backend to pull the latest from Gmail into the Sheet. This runs as its
+// OWN google.script.run request (separate from the data read) so a slow or
+// failed sync can never break the dashboard load with an "HTTP 0" error. It's a
+// bounded incremental sync, so it normally returns in a few seconds; if Gmail is
+// briefly unavailable it just resolves with {ok:false} and the 15-min trigger
+// catches up on its own.
+function runRefreshNow() {
+  return new Promise((resolve) => {
+    if (typeof google === 'undefined' || !google.script || !google.script.run) {
+      resolve({ ok: false, error: 'not-in-webapp' });
+      return;
+    }
+    google.script.run
+      .withSuccessHandler(res => resolve(res || { ok: false }))
+      .withFailureHandler(err => resolve({ ok: false, error: (err && err.message) || String(err) }))
+      .refreshNow();
+  });
+}
+
 function daysSince(iso) {
   if (!iso) return null;
   const t = new Date(iso).getTime();
@@ -3437,9 +3456,15 @@ async function init() {
     btn.disabled = true;
     document.getElementById('driver-table-wrap').innerHTML = '<div class="loading">Syncing the latest submissions from Gmail…</div>';
     try {
-      allDrivers = await fetchAllSubmissions(filters.range, true);
+      // 1) Pull the newest emails into the Sheet (own request, never blocks the read).
+      const res = await runRefreshNow();
+      // 2) Re-read from the Sheet (fast, no Gmail in the request thread).
+      allDrivers = await fetchAllSubmissions(filters.range, false);
       renderAll();
       setLoadedTime();
+      if (res && res.ok === false && res.error && res.error !== 'busy') {
+        setStatus('Loaded from the database. (Live Gmail refresh is busy — the background sync will catch up.)');
+      }
     } catch (err) {
       showError(err);
     }
